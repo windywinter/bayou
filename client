@@ -17,7 +17,7 @@ pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
 
 def master_handler():
-	global master_sock, sock_to_server
+	global master_sock
 	while True:
         try:
             data = master_sock.recv(256)
@@ -49,6 +49,10 @@ def master_handler():
                     msg_to_server = '%s %s\n' % (s[0], s[1])
 
                 if server_id:
+                	sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+					sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+					sock_to_server.bind(('localhost', SERVER_PORT_BASE + pid))
+
                 	status = sock_to_server.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
                 	if status != 0:
                 		logging.debug('connection to server failed: ' + server_id)
@@ -59,7 +63,7 @@ def master_handler():
 						response = sock_to_server.recv(256)
 						response = response.split('\n')[0].split()[0]
 						master_sock.sendall('getResp %s:%s\n' % (songName, response))
-                    sock_to_server.shutdown()
+                    sock_to_server.close()
         else:
             logging.info('connection from master closed')
             break
@@ -79,9 +83,6 @@ sock_to_master.listen(1)
 
 # create the socket to server
 
-sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock_to_server.bind(('localhost', CLIENT_PORT_BASE + pid))
 
 # start responding to master
 master_sock, _ = sock_to_master.accept()

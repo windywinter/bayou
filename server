@@ -1,0 +1,99 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import sys
+import socket
+import os
+
+if not len(sys.argv) == 3:
+	print "Usage : server [id] [master_port]"
+	sys.exit()
+
+pid = int(sys.argv[1])
+master_port = int(sys.argv[2])
+
+def master_handler():
+	while True:
+        try:
+            data = master_sock.recv(256)
+        except:
+            data = None
+        if data:
+            logging.debug("data received from master: " + data)
+            for line in data.split('\n'):
+                if not line:
+                    break
+                s = line.split()
+                if s[0] == 'msg':
+                    msg_id = int(s[1])
+                    # msg = s[2]
+                    if msg_id not in msgs:
+                        msgs[msg_id] = s[2]
+                        paxos_instances[msg_id] = paxos_instance(msg_id)
+                    stable_storage().log_msg(msg_id)
+                    thread.start_new_thread(paxos_loop, (msg_id,))
+                elif s[0] == 'get' and s[1] == 'chatLog':
+                    for instance in paxos_instances.itervalues():
+                        if instance.accepted_value != -1 and instance.final_value is None:
+                            thread.start_new_thread(paxos_instance.prepare, (instance,))
+                    time.sleep(PAXOS_TIMEOUT)
+                    for instance in paxos_instances.itervalues():
+                        if instance.final_value is not None:
+                            chatLog[instance.final_value] = instance.instance_id
+                    res = ''
+                    for _, msg_id in chatLog.items():
+                        res = res + msgs[msg_id] + ','
+                    logging.debug('chatLog: ' + res[:-1] + '\n')
+                    master_sock.sendall('chatLog ' + res[:-1] + '\n')
+                elif s[0] == 'crash':
+                    master_sock.close()
+                    logging.info('process %d exits', pid)
+                    os._exit(1)
+                elif s[0] == 'crashAfterP1b':
+                    crashAfterPromise = True
+                elif s[0] == 'crashAfterP2b':
+                    crashAfterAcceptAck = True
+                elif s[0] == 'crashP1a':
+                    crashAfterPrepare = True
+                    if len(s) == 1:
+                        partialPrepare = []
+                    else:
+                        for i in range(1, len(s)):
+                            partialPrepare.append(int(s[i]))
+                elif s[0] == 'crashP2a':
+                    crashAfterAcceptReq = True
+                    if len(s) == 1:
+                        partialAcceptReq = []
+                    else:
+                        for i in range(1, len(s)):
+                            partialAcceptReq.append(int(s[i]))
+                elif s[0] == 'crashDecision':
+                    crashAfterDecision = True
+                    if len(s) == 1:
+                        partialDecision = []
+                    else:
+                        for i in range(1, len(s)):
+                            partialDecision.append(int(s[i]))
+        else:
+            logging.info('connection from master closed')
+            break
+    master_sock.close()
+    logging.info('process %d exits', pid)
+    os._exit(1)
+
+#TODO
+
+#create socket for master
+sock_to_master = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock_to_master.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock_to_master.bind(('localhost', master_port))
+
+# Listen for incoming connections
+sock_to_master.listen(1)
+
+# TODO
+
+# start responding to master
+master_sock, _ = sock_to_master.accept()
+# start new thread to handle master connection
+thread.start_new_thread(master_handler, ())

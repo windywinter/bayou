@@ -9,8 +9,10 @@ if not len(sys.argv) == 3:
 	print "Usage : server [id] [master_port]"
 	sys.exit()
 
-pid = int(sys.argv[1])
+pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
+
+pname = None # obtain this by recursive naming protocol
 
 def master_handler():
 	while True:

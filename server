@@ -4,17 +4,54 @@
 import sys
 import socket
 import os
+import thread
+import time
+import ast
 
 if not len(sys.argv) == 3:
 	print "Usage : server [id] [master_port]"
 	sys.exit()
 
+SERVER_PORT_BASE = 20000
+CLIENT_PORT_BASE = SERVER_PORT_BASE
+INT_MAX = sys.maxint
+
 pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
 
+socks = {} # {pid : connection}
+close_flag = {} # {pid : whether to close connection after this current anti-entropy}
+
+'''Bayou Protocol Variables'''
+
 pname = None # obtain this by recursive naming protocol
 
-def master_handler():
+#connected_server = {} # pid : pname, connected servers
+
+write_log = [] # list of logEntry, tentative and committed
+# committed_log = [] # list of logEntry, committed
+
+accept_time = 1
+
+version_vector = {} # pname : max(accept_time)
+
+play_list = {} # database of all songs and there name
+
+primary = False
+
+retirement = False
+
+CSN = 0
+
+class logEntry:
+    def __init__(self, csn, accept_t, pn, cmd):
+        self.csn = csn
+        self.accept_t = accept_t
+        self.pn = pn
+        self.cmd = cmd
+
+def master_handler(master_sock):
+    global socks, close_flag, accept_time, pname, retirement, write_log
 	while True:
         try:
             data = master_sock.recv(256)
@@ -26,56 +63,49 @@ def master_handler():
                 if not line:
                     break
                 s = line.split()
-                if s[0] == 'msg':
-                    msg_id = int(s[1])
-                    # msg = s[2]
-                    if msg_id not in msgs:
-                        msgs[msg_id] = s[2]
-                        paxos_instances[msg_id] = paxos_instance(msg_id)
-                    stable_storage().log_msg(msg_id)
-                    thread.start_new_thread(paxos_loop, (msg_id,))
-                elif s[0] == 'get' and s[1] == 'chatLog':
-                    for instance in paxos_instances.itervalues():
-                        if instance.accepted_value != -1 and instance.final_value is None:
-                            thread.start_new_thread(paxos_instance.prepare, (instance,))
-                    time.sleep(PAXOS_TIMEOUT)
-                    for instance in paxos_instances.itervalues():
-                        if instance.final_value is not None:
-                            chatLog[instance.final_value] = instance.instance_id
-                    res = ''
-                    for _, msg_id in chatLog.items():
-                        res = res + msgs[msg_id] + ','
-                    logging.debug('chatLog: ' + res[:-1] + '\n')
-                    master_sock.sendall('chatLog ' + res[:-1] + '\n')
-                elif s[0] == 'crash':
-                    master_sock.close()
-                    logging.info('process %d exits', pid)
-                    os._exit(1)
-                elif s[0] == 'crashAfterP1b':
-                    crashAfterPromise = True
-                elif s[0] == 'crashAfterP2b':
-                    crashAfterAcceptAck = True
-                elif s[0] == 'crashP1a':
-                    crashAfterPrepare = True
-                    if len(s) == 1:
-                        partialPrepare = []
-                    else:
-                        for i in range(1, len(s)):
-                            partialPrepare.append(int(s[i]))
-                elif s[0] == 'crashP2a':
-                    crashAfterAcceptReq = True
-                    if len(s) == 1:
-                        partialAcceptReq = []
-                    else:
-                        for i in range(1, len(s)):
-                            partialAcceptReq.append(int(s[i]))
-                elif s[0] == 'crashDecision':
-                    crashAfterDecision = True
-                    if len(s) == 1:
-                        partialDecision = []
-                    else:
-                        for i in range(1, len(s)):
-                            partialDecision.append(int(s[i]))
+                if s[0] == 'createConn':
+                    for i in range(1, len(s)):
+                        server_id = int(s[i])
+                        if server_id not in socks:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                            sock.bind(('localhost', SERVER_PORT_BASE + pid))
+
+                            status = sock.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
+                            if status != 0:
+                                logging.debug('connection to server failed: ' + server_id)
+                                continue
+                            socks[server_id] = sock
+                            close_flag[server_id] = False
+                            if pname == None:
+                                # The case when a process does not have a name
+                                # assume the other process already has a name
+                                sock.sendall('create\n')
+                                name_resp = sock.recv(256)
+                                name_resp = name_resp.split('\n')[0].split()
+                                accept_time = int(name_resp[0]) + 1
+                                pname = '%s%d' % (name_resp[1], int(name_resp[0]))
+                            else:
+                                sock.sendall('establish\n')
+                                name_resp = sock.recv(256)
+                                name_resp = name_resp.split.('\n')[0].split()
+                                if name_resp[0] == 'create':
+                                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s%d' % (pname, accept_time)))
+                                    accept_time = accept_time + 1
+                                    sock.sendall('%d %s\n' % (accept_time, pname))
+                                # the other case : peer has name, so directly enter AE
+                            thread.start_new_thread(anti_entropy, (sock, server_id))
+                elif s[0] == 'breakConn':
+                    for i in range(1, len(s)):
+                        server_id = int(s[i])
+                        if server_id in socks:
+                            close_flag[server_id] = True
+                elif s[0] == 'retire':
+                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'RETIRE %s' % pname))
+                    accept_time = accept_time + 1
+                    retirement = True
+                elif s[0] == 'printLog':
+                    # TODO : print log
         else:
             logging.info('connection from master closed')
             break
@@ -83,19 +113,132 @@ def master_handler():
     logging.info('process %d exits', pid)
     os._exit(1)
 
-#TODO
+def server_handler(server_sock, server_id):
+    global pname, accept_time, write_log
+    active_flag = True
+    while active_flag:
+        try:
+            data = server_sock.recv(256)
+        except:
+            data = None
+        if data:
+            logging.debug("data received from peers: " + data)
+            for line in data.split('\n'):
+                if not line:
+                    break
+                s = line.split()
+                # cases when peer is client
+                if s[0] == 'add':
+                    # TODO : add songName url
+                elif s[0] == 'delete':
+                    # TODO : delete songName
+                elif s[0] == 'get':
+                    # TODO : get songName
+                # cases when peer is server
+                elif s[0] == 'create':
+                    # TODO : pname wrong, should be 'pname#accept_time'
+                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s%d' % (pname, accept_time)))
+                    accept_time = accept_time + 1
+                    server_sock.sendall('%d %s\n' % (accept_time, pname))
+                    anti_entropy(server_sock, server_id)
+                    active_flag = False
+                    break
+                elif s[0] == 'establish':
+                    if pname == None:
+                        server_sock.sendall('create\n')
+                        name_resp = server_sock.recv(256)
+                        name_resp = name_resp.split('\n')[0].split()
+                        accept_time = int(name_resp[0]) + 1
+                        pname = '%s%d' % (name_resp[1], int(name_resp[0]))
+                    else:
+                        server_sock.sendall('ack\n')
+                    anti_entropy(server_sock, server_id)
+                    active_flag = False
+                    break
+                # other cases will be handled in anti-entropy
+        else:
+            logging.info('connection from master closed')
+            break
+    server_sock.close()
+    logging.info('process %d loses connection from %d', pid, server_id)
+
+def anti_entropy(server_sock, server_id):
+    global close_flag, retirement, CSN, write_log, pname, version_vector
+    while not close_flag[server_id]:
+        # keep synchronized and wait for a while before a new AE
+        time.sleep(0.05)
+        server_sock.sendall('csn %d %s\n' % (CSN, str(version_vector)))
+        response = server_sock.recv(512)
+        response = response.split('\n')[0].split()
+        if response[0] == 'csn':
+            other_csn = int(response[1])
+            other_vv = ast.literal_eval(response[2])
+            if other_csn < CSN:
+                for log in write_log:
+                    if log.csn != INT_MAX:
+                        # committed log
+                        if log.accept_t <= other_vv[pname]:
+                            server_sock.sendall('commit %d %s %d\n' % (log.accept_t, log.pn, log.csn))
+                        else:
+                            server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+                    else:
+                        # tentative log
+                        if log.accept_t > other_vv[pname]:
+                            server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+                server_sock.sendall('end\n')
+            elif other_csn > CSN:
+                ae_end_flag = False
+                while not ae_end_flag:
+                    response = server_sock.recv(4096)
+                    response = response.split('\n')
+                    for msg in response:
+                        words = msg.split()
+                        if words[0] == 'commit':
+                            new_accept_t = int(words[1])
+                            new_pn = words[2]
+                            new_csn = int(words[3])
+                            for ii in len(write_log):
+                                if write_log[ii].accept_t == new_accept_t and write_log[ii].pn == new_pn:
+                                    write_log[ii].csn = new_csn
+                                    break
+                        elif words[0] == 'write':
+                            new_accept_t = int(words[1])
+                            new_pn = words[2]
+                            new_csn = int(words[3])
+                            new_cmd = words[4]
+                            write_log.append(logEntry(new_csn, new_accept_t, new_pn, new_cmd))
+                        elif words[0] == 'end':
+                            ae_end_flag = True
+                            break
+                CSN = other_csn
+            # Update Version Vector
+            for proc, m_accept_time in version_vector:
+                # TODO : missing vv
+                if proc in other_vv:
 
 #create socket for master
 sock_to_master = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock_to_master.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock_to_master.bind(('localhost', master_port))
-
-# Listen for incoming connections
 sock_to_master.listen(1)
 
-# TODO
+#create socket for other servers and clients
+sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock_to_server.bind(('localhost', SERVER_PORT_BASE + pid))
+sock_to_server.listen(1)
+
+if pid == 0:
+    primary = True
+    pname = '0'
+    accept_time = 1
 
 # start responding to master
 master_sock, _ = sock_to_master.accept()
 # start new thread to handle master connection
-thread.start_new_thread(master_handler, ())
+thread.start_new_thread(master_handler, (master_sock,))
+
+while True:
+    server_sock, server_addr = sock_to_server.accept()
+    server_id = int(server_addr[1]) - SERVER_PORT_BASE
+    thread.start_new_thread(server_handler, (server_sock, server_id))

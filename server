@@ -31,11 +31,11 @@ pname = None # obtain this by recursive naming protocol
 write_log = [] # list of logEntry, tentative and committed
 # committed_log = [] # list of logEntry, committed
 
-accept_time = 1
+accept_time = 0
 
 version_vector = {} # pname : max(accept_time)
 
-play_list = {} # database of all songs and there name
+play_list = {} # {song_name : {url:str, nwrites : int}}
 
 primary = False
 
@@ -45,10 +45,64 @@ CSN = 0
 
 class logEntry:
     def __init__(self, csn, accept_t, pn, cmd):
-        self.csn = csn
+        global primary, CSN
+        if primary:
+            self.csn = CSN + 1
+            CSN = CSN + 1
+        else:
+            self.csn = csn
         self.accept_t = accept_t
         self.pn = pn
         self.cmd = cmd
+        values = cmd.split()
+        self.type = values[0]
+        self.interal_id = None
+        self.song_name = None
+        self.url = None
+        if values[0] == 'CREATE' or values[0] == 'RETIRE':
+            self.interal_id = values[1]
+        elif values[0] == 'PUT':
+            self.song_name = values[1]
+            self.url = values[2]
+        elif values[0] == 'DELETE':
+            self.song_name = values[1]
+        # whenever a new log is created, process it
+        self.process_log()
+
+    def __cmp__(self, other):
+        if self.csn < other.csn:
+            return -1
+        elif self.csn > other.csn:
+            return 1
+        else:
+            if self.accept_t < other.accept_t:
+                return -1
+            elif self.accept_t > other.accept_t:
+                return 1
+            else:
+                if self.pn < other.pn:
+                    return -1
+                elif self.pn > other.pn:
+                    return 1
+                else:
+                    return 0
+
+    def process_log(self):
+        global play_list, version_vector
+        if self.type == 'CREATE':
+            version_vector[self.interal_id] = self.accept_t
+        elif self.type == 'RETIRE':
+            version_vector.pop(self.interal_id)
+        elif self.type == 'PUT':
+            if version_vector[self.interal_id] < self.accept_t:
+                version_vector[self.interal_id] = self.accept_t
+            if song_name not in play_list:
+                play_list[self.song_name] = {'url' : self.url, 'nwrites' : 1}
+            else:
+                play_list[self.song_name]['url'] = self.url
+                play_list[self.song_name]['nwrites'] = play_list[self.song_name]['nwrites'] + 1
+        elif self.type == 'DELETE':
+            # TODO : delete
 
 def master_handler(master_sock):
     global socks, close_flag, accept_time, pname, retirement, write_log
@@ -84,13 +138,13 @@ def master_handler(master_sock):
                                 name_resp = sock.recv(256)
                                 name_resp = name_resp.split('\n')[0].split()
                                 accept_time = int(name_resp[0]) + 1
-                                pname = '%s%d' % (name_resp[1], int(name_resp[0]))
+                                pname = '%s|%d' % (name_resp[1], int(name_resp[0]))
                             else:
                                 sock.sendall('establish\n')
                                 name_resp = sock.recv(256)
                                 name_resp = name_resp.split.('\n')[0].split()
                                 if name_resp[0] == 'create':
-                                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s%d' % (pname, accept_time)))
+                                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
                                     accept_time = accept_time + 1
                                     sock.sendall('%d %s\n' % (accept_time, pname))
                                 # the other case : peer has name, so directly enter AE
@@ -105,7 +159,22 @@ def master_handler(master_sock):
                     accept_time = accept_time + 1
                     retirement = True
                 elif s[0] == 'printLog':
-                    # TODO : print log
+                    all_log = 'log '
+                    for log_entry in write_log:
+                        if log_entry.csn == INT_MAX:
+                            stable_bool = 'FALSE'
+                        else:
+                            stable_bool = 'TRUE'
+                        if log_entry.type == 'PUT':
+                            all_log = all_log + ',%s:(%s,%s):%s' % (log_entry.type, log_entry.song_name, log_entry.url, stable_bool)
+                        elif log_entry.type == 'DELETE':
+                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.song_name, stable_bool)
+                        elif log_entry.type == 'CREATE':
+                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                        elif log_entry.type == 'RETIRE':
+                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                    all_log = all_log + '\n'
+                    master_sock.sendall(all_log)
         else:
             logging.info('connection from master closed')
             break
@@ -114,7 +183,7 @@ def master_handler(master_sock):
     os._exit(1)
 
 def server_handler(server_sock, server_id):
-    global pname, accept_time, write_log
+    global pname, accept_time, write_log, play_list
     active_flag = True
     while active_flag:
         try:
@@ -129,15 +198,49 @@ def server_handler(server_sock, server_id):
                 s = line.split()
                 # cases when peer is client
                 if s[0] == 'add':
-                    # TODO : add songName url
+                    client_write_times = int(s[1])
+                    songName = s[2]
+                    url = s[3]
+                    if songName not in play_list:
+                        play_list[songName] = {'url' : None, 'nwrites' : 0}
+                    if play_list[songName]['nwrites'] >= client_write_times - 1:
+                        server_sock.sendall('ack\n')
+                        write_log.append(logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (s[2], s[3])))
+                        accept_time = accept_time + 1
+                    else:
+                        # write fails
+                        server_sock.sendall('failed\n')
+                    accept_time = accept_time + 1
                 elif s[0] == 'delete':
-                    # TODO : delete songName
+                    client_write_times = int(s[1])
+                    songName = s[2]
+                    if songName not in play_list:
+                        play_list[songName] = {'url' : None, 'nwrites' : 0}
+                    if play_list[songName]['nwrites'] >= client_write_times - 1:
+                        server_sock.sendall('ack\n')
+                        write_log.append(logEntry(INT_MAX, accept_time, pname, 'DELETE %s' % s[2]))
+                        accept_time = accept_time + 1
+                    else:
+                        # write fails
+                        server_sock.sendall('failed\n')
+                    accept_time = accept_time + 1
                 elif s[0] == 'get':
-                    # TODO : get songName
+                    client_write_times = int(s[1])
+                    songName = s[2]
+                    return_msg = None
+                    if songName not in play_list:
+                        return_msg = 'ERR_KEY\n'
+                    elif play_list[songName]['nwrites'] >= client_write_times:
+                        return_msg = play_list[songName]['url'] + '\n'
+                    else:
+                        # read fails, error dependency
+                        return_msg = 'ERR_DEP\n'
+                    server_sock.sendall(return_msg)
+
                 # cases when peer is server
                 elif s[0] == 'create':
-                    # TODO : pname wrong, should be 'pname#accept_time'
-                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s%d' % (pname, accept_time)))
+                    # new pname : 'pname|accept_time'
+                    write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
                     accept_time = accept_time + 1
                     server_sock.sendall('%d %s\n' % (accept_time, pname))
                     anti_entropy(server_sock, server_id)
@@ -149,7 +252,7 @@ def server_handler(server_sock, server_id):
                         name_resp = server_sock.recv(256)
                         name_resp = name_resp.split('\n')[0].split()
                         accept_time = int(name_resp[0]) + 1
-                        pname = '%s%d' % (name_resp[1], int(name_resp[0]))
+                        pname = '%s|%d' % (name_resp[1], int(name_resp[0]))
                     else:
                         server_sock.sendall('ack\n')
                     anti_entropy(server_sock, server_id)
@@ -173,48 +276,57 @@ def anti_entropy(server_sock, server_id):
         if response[0] == 'csn':
             other_csn = int(response[1])
             other_vv = ast.literal_eval(response[2])
-            if other_csn < CSN:
-                for log in write_log:
+
+            for log in write_log:
+                if log.pn in other_vv:
                     if log.csn != INT_MAX:
                         # committed log
-                        if log.accept_t <= other_vv[pname]:
-                            server_sock.sendall('commit %d %s %d\n' % (log.accept_t, log.pn, log.csn))
-                        else:
-                            server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+                        if CSN > other_csn:
+                            if log.accept_t <= other_vv[log.pn]:
+                                server_sock.sendall('commit %d %s %d\n' % (log.accept_t, log.pn, log.csn))
+                            else:
+                                server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
                     else:
                         # tentative log
-                        if log.accept_t > other_vv[pname]:
+                        if log.accept_t > other_vv[log.pn]:
                             server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
-                server_sock.sendall('end\n')
-            elif other_csn > CSN:
-                ae_end_flag = False
-                while not ae_end_flag:
-                    response = server_sock.recv(4096)
-                    response = response.split('\n')
-                    for msg in response:
-                        words = msg.split()
-                        if words[0] == 'commit':
-                            new_accept_t = int(words[1])
-                            new_pn = words[2]
-                            new_csn = int(words[3])
-                            for ii in len(write_log):
-                                if write_log[ii].accept_t == new_accept_t and write_log[ii].pn == new_pn:
-                                    write_log[ii].csn = new_csn
-                                    break
-                        elif words[0] == 'write':
-                            new_accept_t = int(words[1])
-                            new_pn = words[2]
-                            new_csn = int(words[3])
-                            new_cmd = words[4]
-                            write_log.append(logEntry(new_csn, new_accept_t, new_pn, new_cmd))
-                        elif words[0] == 'end':
-                            ae_end_flag = True
-                            break
+                else:
+                    # Missing vv case
+                    recursive_time_stamp = log.pn[log.pn.rfind('|') + 1 : ]
+                    recursive_name = log.pn[0 : log.pn.rfind('|')]
+                    if other_vv[recursive_name] < recursive_time_stamp:
+                        server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+            server_sock.sendall('end\n')
+            ae_end_flag = False
+            while not ae_end_flag:
+                response = server_sock.recv(256)
+                response = response.split('\n')
+                for msg in response:
+                    words = msg.split()
+                    if words[0] == 'commit':
+                        new_accept_t = int(words[1])
+                        new_pn = words[2]
+                        new_csn = int(words[3])
+                        for ii in len(write_log):
+                            if write_log[ii].accept_t == new_accept_t and write_log[ii].pn == new_pn:
+                                write_log[ii].csn = new_csn
+                                break
+                    elif words[0] == 'write':
+                        new_accept_t = int(words[1])
+                        new_pn = words[2]
+                        new_csn = int(words[3])
+                        new_cmd = words[4]
+                        write_log.append(logEntry(new_csn, new_accept_t, new_pn, new_cmd))
+                    elif words[0] == 'end':
+                        ae_end_flag = True
+                        break
+
+            if other_csn > CSN:
                 CSN = other_csn
-            # Update Version Vector
-            for proc, m_accept_time in version_vector:
-                # TODO : missing vv
-                if proc in other_vv:
+            if retirement:
+                break
+    server_sock.close()
+    logging.info('process %d loses connection from %d', pid, server_id)
 
 #create socket for master
 sock_to_master = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -231,7 +343,7 @@ sock_to_server.listen(1)
 if pid == 0:
     primary = True
     pname = '0'
-    accept_time = 1
+    accept_time = 0
 
 # start responding to master
 master_sock, _ = sock_to_master.accept()

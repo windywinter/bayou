@@ -6,8 +6,8 @@ import socket
 import os
 
 if not len(sys.argv) == 3:
-	print "Usage : server [id] [master_port]"
-	sys.exit()
+    print "Usage : server [id] [master_port]"
+    sys.exit()
 
 SERVER_PORT_BASE = 20000
 CLIENT_PORT_BASE = SERVER_PORT_BASE
@@ -16,9 +16,11 @@ CLIENT_PORT_BASE = SERVER_PORT_BASE
 pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
 
+song_names = {} # songName : number of writes
+
 def master_handler():
-	global master_sock
-	while True:
+    global master_sock
+    while True:
         try:
             data = master_sock.recv(256)
         except:
@@ -34,35 +36,41 @@ def master_handler():
                 url = None
                 server_id = None
                 msg_to_server = None
+                songName = s[1]
+                if songName not in song_names:
+                    song_names[songName] = 0
                 if s[0] == 'add':
-                	songName = s[1]
-                	url = s[2]
+                    url = s[2]
                     server_id = int(s[3])
-                    msg_to_server = '%s %s %s\n' % (s[0], s[1], s[2])
+                    song_names[songName] = song_names[songName] + 1
+                    msg_to_server = '%s %d %s %s\n' % (s[0], song_names[songName], s[1], s[2])
                 elif s[0] == 'get':
-                    songName = s[1]
                     server_id = int(s[2])
-                    msg_to_server = '%s %s\n' % (s[0], s[1])
+                    msg_to_server = '%s %s\n' % (s[0], song_names[songName], s[1])
                 elif s[0] == 'delete':
-                    songName = s[1]
                     server_id = int(s[2])
-                    msg_to_server = '%s %s\n' % (s[0], s[1])
+                    song_names[songName] = song_names[songName] + 1
+                    msg_to_server = '%s %s\n' % (s[0], song_names[songName], s[1])
 
                 if server_id:
-                	sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-					sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-					sock_to_server.bind(('localhost', SERVER_PORT_BASE + pid))
+                    sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock_to_server.bind(('localhost', SERVER_PORT_BASE + pid))
 
-                	status = sock_to_server.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
-                	if status != 0:
-                		logging.debug('connection to server failed: ' + server_id)
-                		continue
+                    status = sock_to_server.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
+                    if status != 0:
+                        logging.debug('connection to server failed: ' + server_id)
+                        continue
 
-					sock_to_server.sendall(msg_to_server)
-					if s[0] == 'get':
-						response = sock_to_server.recv(256)
-						response = response.split('\n')[0].split()[0]
-						master_sock.sendall('getResp %s:%s\n' % (songName, response))
+                    sock_to_server.sendall(msg_to_server)
+                    
+                    response = sock_to_server.recv(256)
+                    response = response.split('\n')[0].split()[0]
+                    if s[0] == 'get':
+                        master_sock.sendall('getResp %s:%s\n' % (songName, response))
+                    elif response != 'ack':
+                        # write fails
+                        song_names[songName] = song_names[songName] - 1
                     sock_to_server.close()
         else:
             logging.info('connection from master closed')

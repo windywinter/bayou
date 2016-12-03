@@ -102,7 +102,10 @@ class logEntry:
                 play_list[self.song_name]['url'] = self.url
                 play_list[self.song_name]['nwrites'] = play_list[self.song_name]['nwrites'] + 1
         elif self.type == 'DELETE':
-            # TODO : delete
+            if version_vector[self.interal_id] < self.accept_t:
+                version_vector[self.interal_id] = self.accept_t
+            if song_name in play_list:
+                play_list.pop(self.song_name)
 
 def master_handler(master_sock):
     global socks, close_flag, accept_time, pname, retirement, write_log

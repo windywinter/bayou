@@ -7,6 +7,7 @@ import os
 import thread
 import time
 import ast
+import logging
 
 if not len(sys.argv) == 3:
 	print "Usage : server [id] [master_port]"
@@ -18,6 +19,8 @@ INT_MAX = sys.maxint
 
 pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
+
+logging.basicConfig(format='[' + str(pid) + '] %(levelname)s: %(message)s', level=logging.ERROR)
 
 socks = {} # {pid : connection}
 close_flag = {} # {pid : whether to close connection after this current anti-entropy}
@@ -88,11 +91,12 @@ class logEntry:
                     return 0
 
     def process_log(self):
-        global play_list, version_vector
+        global play_list, version_vector, retirement
         if self.type == 'CREATE':
             version_vector[self.interal_id] = self.accept_t
         elif self.type == 'RETIRE':
-            version_vector.pop(self.interal_id)
+            if not retirement:
+                version_vector.pop(self.interal_id)
         elif self.type == 'PUT':
             if version_vector[self.interal_id] < self.accept_t:
                 version_vector[self.interal_id] = self.accept_t
@@ -269,7 +273,7 @@ def server_handler(server_sock, server_id):
     logging.info('process %d loses connection from %d', pid, server_id)
 
 def anti_entropy(server_sock, server_id):
-    global close_flag, retirement, CSN, write_log, pname, version_vector
+    global close_flag, retirement, CSN, write_log, pname, version_vector, primary
     while not close_flag[server_id]:
         # keep synchronized and wait for a while before a new AE
         time.sleep(0.05)
@@ -299,6 +303,8 @@ def anti_entropy(server_sock, server_id):
                     recursive_name = log.pn[0 : log.pn.rfind('|')]
                     if other_vv[recursive_name] < recursive_time_stamp:
                         server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+            if primary and retirement:
+                server_sock.sendall('primary\n')
             server_sock.sendall('end\n')
             ae_end_flag = False
             while not ae_end_flag:
@@ -320,6 +326,8 @@ def anti_entropy(server_sock, server_id):
                         new_csn = int(words[3])
                         new_cmd = words[4]
                         write_log.append(logEntry(new_csn, new_accept_t, new_pn, new_cmd))
+                    elif words[0] == 'primary':
+                        primary = True
                     elif words[0] == 'end':
                         ae_end_flag = True
                         break
@@ -330,6 +338,8 @@ def anti_entropy(server_sock, server_id):
                 break
     server_sock.close()
     logging.info('process %d loses connection from %d', pid, server_id)
+    if retirement:
+        os._exit(1)
 
 #create socket for master
 sock_to_master = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

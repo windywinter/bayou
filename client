@@ -4,6 +4,8 @@
 import sys
 import socket
 import os
+# import logging
+import thread
 
 if not len(sys.argv) == 3:
     print "Usage : server [id] [master_port]"
@@ -12,11 +14,12 @@ if not len(sys.argv) == 3:
 SERVER_PORT_BASE = 20000
 CLIENT_PORT_BASE = SERVER_PORT_BASE
 
-
 pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
 
 song_names = {} # songName : number of writes
+
+# logging.basicConfig(format='[' + str(pid) + '] %(levelname)s: %(message)s', level=logging.ERROR)
 
 def master_handler():
     global master_sock
@@ -26,7 +29,8 @@ def master_handler():
         except:
             data = None
         if data:
-            logging.debug("data received from master: " + data)
+            # logging.debug("data received from master: " + data)
+            print 'data received from master: %s' % data
             for line in data.split('\n'):
                 if not line:
                     break
@@ -59,7 +63,7 @@ def master_handler():
 
                     status = sock_to_server.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
                     if status != 0:
-                        logging.debug('connection to server failed: ' + server_id)
+                        # logging.debug('connection to server failed: ' + server_id)
                         continue
 
                     sock_to_server.sendall(msg_to_server)
@@ -73,10 +77,11 @@ def master_handler():
                         song_names[songName] = song_names[songName] - 1
                     sock_to_server.close()
         else:
-            logging.info('connection from master closed')
+            # logging.info('connection from master closed')
+            print 'connection from master closed'
             break
     master_sock.close()
-    logging.info('process %d exits', pid)
+    # logging.info('process %d exits', pid)
     os._exit(1)
 
 #TODO
@@ -95,4 +100,4 @@ sock_to_master.listen(1)
 # start responding to master
 master_sock, _ = sock_to_master.accept()
 # start new thread to handle master connection
-thread.start_new_thread(master_handler, ())
+master_handler()

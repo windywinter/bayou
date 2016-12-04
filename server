@@ -328,7 +328,7 @@ def anti_entropy(server_sock, server_id):
         time.sleep(0.05)
         # only one instance of AE could be excecuted at a time
         log_lock.acquire()
-        server_sock.sendall('csn %d %s\n' % (CSN, str(version_vector)))
+        server_sock.sendall('csn %d %s\n' % (CSN, str(version_vector).replace(' ', '')))
         response = server_sock.recv(512)
         response = response.split('\n')[0].split()
         if response[0] == 'csn':

@@ -10,8 +10,8 @@ import ast
 import logging
 
 if not len(sys.argv) == 3:
-	print "Usage : server [id] [master_port]"
-	sys.exit()
+    print "Usage : server [id] [master_port]"
+    sys.exit()
 
 SERVER_PORT_BASE = 20000
 CLIENT_PORT_BASE = SERVER_PORT_BASE
@@ -113,7 +113,7 @@ class logEntry:
 
 def master_handler(master_sock):
     global socks, close_flag, accept_time, pname, retirement, write_log
-	while True:
+    while True:
         try:
             data = master_sock.recv(256)
         except:
@@ -149,7 +149,7 @@ def master_handler(master_sock):
                             else:
                                 sock.sendall('establish\n')
                                 name_resp = sock.recv(256)
-                                name_resp = name_resp.split.('\n')[0].split()
+                                name_resp = name_resp.split('\n')[0].split()
                                 if name_resp[0] == 'create':
                                     write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
                                     accept_time = accept_time + 1
@@ -309,6 +309,7 @@ def anti_entropy(server_sock, server_id):
             ae_end_flag = False
             while not ae_end_flag:
                 response = server_sock.recv(256)
+                logging.debug("anti-entropy data: " + response)
                 response = response.split('\n')
                 for msg in response:
                     words = msg.split()
@@ -347,6 +348,11 @@ sock_to_master.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock_to_master.bind(('localhost', master_port))
 sock_to_master.listen(1)
 
+# start responding to master
+master_sock, _ = sock_to_master.accept()
+# start new thread to handle master connection
+thread.start_new_thread(master_handler, (master_sock,))
+
 #create socket for other servers and clients
 sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -357,11 +363,6 @@ if pid == 0:
     primary = True
     pname = '0'
     accept_time = 0
-
-# start responding to master
-master_sock, _ = sock_to_master.accept()
-# start new thread to handle master connection
-thread.start_new_thread(master_handler, (master_sock,))
 
 while True:
     server_sock, server_addr = sock_to_server.accept()

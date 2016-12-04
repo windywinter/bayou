@@ -26,7 +26,7 @@ master_port = int(sys.argv[2])
 
 logging.basicConfig(filename=str(pid) + '.log',format='[' + str(pid) + '] %(levelname)s: %(message)s', level=logging.DEBUG)
 
-socks = {} # {pid : connection}
+# socks = {} # {pid : connection}
 close_flag = {} # {pid : whether to close connection after this current anti-entropy}
 
 '''Bayou Protocol Variables'''
@@ -112,7 +112,7 @@ class logEntry:
                 play_list.pop(self.song_name)
 
 def master_handler(master_sock):
-    global socks, close_flag, accept_time, pname, retirement, write_log, committed_log, primary
+    global close_flag, accept_time, pname, retirement, write_log, committed_log, primary
     while True:
         try:
             data = master_sock.recv(256)
@@ -127,7 +127,7 @@ def master_handler(master_sock):
                 if s[0] == 'createConn':
                     for i in range(1, len(s)):
                         server_id = int(s[i])
-                        if server_id not in socks:
+                        if server_id not in close_flag:
                             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                             sock.bind(('localhost', SERVER_SEND_BASE + pid))
@@ -136,7 +136,7 @@ def master_handler(master_sock):
                             if status != 0:
                                 logging.debug('connection to server failed: ' + server_id)
                                 continue
-                            socks[server_id] = sock
+                            # socks[server_id] = sock
                             close_flag[server_id] = False
                             if pname == None:
                                 # The case when a process does not have a name
@@ -164,7 +164,7 @@ def master_handler(master_sock):
                 elif s[0] == 'breakConn':
                     for i in range(1, len(s)):
                         server_id = int(s[i])
-                        if server_id in socks:
+                        if server_id in close_flag:
                             close_flag[server_id] = True
                 elif s[0] == 'retire':
                     log_lock.acquire()
@@ -281,6 +281,7 @@ def server_handler(server_sock, server_id):
                         write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
                     accept_time = accept_time + 1
                     server_sock.sendall('%d %s\n' % (accept_time, pname))
+                    close_flag[server_id] = False
                     log_lock.release()
                     anti_entropy(server_sock, server_id)
                     active_flag = False
@@ -294,6 +295,7 @@ def server_handler(server_sock, server_id):
                         pname = '%s|%d' % (name_resp[1], int(name_resp[0]))
                     else:
                         server_sock.sendall('ack\n')
+                    close_flag[server_id] = False
                     anti_entropy(server_sock, server_id)
                     active_flag = False
                     break

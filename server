@@ -113,16 +113,16 @@ class logEntry:
 
 def master_handler(master_sock):
     global socks, close_flag, accept_time, pname, retirement, write_log
-    while True:
+    while True and not retirement:
         try:
             data = master_sock.recv(256)
         except:
             data = None
         if data:
-            logging.debug("data received from master: " + data)
             for line in data.split('\n'):
                 if not line:
                     break
+                logging.debug("data received from master: " + line)
                 s = line.split()
                 if s[0] == 'createConn':
                     for i in range(1, len(s)):
@@ -130,20 +130,18 @@ def master_handler(master_sock):
                         if server_id not in socks:
                             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                            sock.bind(('localhost', SERVER_PORT_BASE + pid))
-
                             status = sock.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
                             if status != 0:
                                 logging.debug('connection to server failed: ' + server_id)
                                 continue
                             socks[server_id] = sock
                             close_flag[server_id] = False
-                            if pname == None:
+                            if pname is None:
                                 # The case when a process does not have a name
                                 # assume the other process already has a name
                                 sock.sendall('create\n')
                                 name_resp = sock.recv(256)
-                                name_resp = name_resp.split('\n')[0].split()
+                                name_resp = name_resp.split('\n')[0].split('|')
                                 accept_time = int(name_resp[0]) + 1
                                 pname = '%s|%d' % (name_resp[1], int(name_resp[0]))
                             else:
@@ -187,9 +185,9 @@ def master_handler(master_sock):
             break
     master_sock.close()
     logging.info('process %d exits', pid)
-    os._exit(1)
+    os._exit(0)
 
-def server_handler(server_sock, server_id):
+def server_handler(server_sock):
     global pname, accept_time, write_log, play_list
     active_flag = True
     while active_flag:
@@ -198,10 +196,10 @@ def server_handler(server_sock, server_id):
         except:
             data = None
         if data:
-            logging.debug("data received from peers: " + data)
             for line in data.split('\n'):
                 if not line:
                     break
+                logging.debug("data received from peer: " + line)
                 s = line.split()
                 # cases when peer is client
                 if s[0] == 'add':
@@ -212,12 +210,11 @@ def server_handler(server_sock, server_id):
                         play_list[songName] = {'url' : None, 'nwrites' : 0}
                     if play_list[songName]['nwrites'] >= client_write_times - 1:
                         server_sock.sendall('ack\n')
-                        write_log.append(logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (s[2], s[3])))
+                        write_log.append(logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (songName, url)))
                         accept_time = accept_time + 1
                     else:
                         # write fails
                         server_sock.sendall('failed\n')
-                    accept_time = accept_time + 1
                 elif s[0] == 'delete':
                     client_write_times = int(s[1])
                     songName = s[2]
@@ -304,6 +301,7 @@ def anti_entropy(server_sock, server_id):
                     if other_vv[recursive_name] < recursive_time_stamp:
                         server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
             if primary and retirement:
+                primary = False
                 server_sock.sendall('primary\n')
             server_sock.sendall('end\n')
             ae_end_flag = False
@@ -366,5 +364,4 @@ if pid == 0:
 
 while True:
     server_sock, server_addr = sock_to_server.accept()
-    server_id = int(server_addr[1]) - SERVER_PORT_BASE
-    thread.start_new_thread(server_handler, (server_sock, server_id))
+    thread.start_new_thread(server_handler, (server_sock, ))

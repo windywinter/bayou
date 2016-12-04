@@ -309,11 +309,11 @@ def server_handler(server_sock, server_id):
 def completeV(pn, vv):
     if pn in vv:
         return vv[pn]
-    elif pn == '0':
+    elif pn.find('|') == -1:
         return INT_MAX
     else:
         # Missing vv case
-        recursive_time_stamp = pn[pn.rfind('|') + 1 : ]
+        recursive_time_stamp = int(pn[pn.rfind('|') + 1 : ])
         recursive_name = pn[0 : pn.rfind('|')]
         value = completeV(recursive_name, vv)
         if value >= recursive_time_stamp:

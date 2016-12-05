@@ -6,9 +6,11 @@
 0 createConn 1 2 3
 0 breakConn 2 3
 0 retire
-1 retire
 1 createConn 2 3
-4 add song1 url1 3
-3 createConn 2
+4 add song1 url1 2
 2 printLog
+1 retire
+4 add song1 url2 3
+4 get song1 2
+4 get song1 3
 exit

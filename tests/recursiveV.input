@@ -1,8 +1,8 @@
 0 startServer 10000
 1 startServer 10001
 2 startServer 10002
-3 startClient 10003
-4 startClient 10004
+3 startServer 10003
+4 startServer 10004
 5 startClient 10005
 0 createConn 1
 0 breakConn 1

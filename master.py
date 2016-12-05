@@ -131,6 +131,7 @@ def main():
                 send(pid, sp1[1], set_wait=True)
             else: # other commands
                 send(pid, sp1[1], set_wait=False)
+        time.sleep(0.5)
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'debug':

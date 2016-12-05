@@ -16,6 +16,8 @@ CLIENT_PORT_BASE = 25000
 pid = int(sys.argv[1]) # id to start server
 master_port = int(sys.argv[2])
 
+socks = {} # server_id : connection
+
 song_names = {} # songName : number of writes
 
 logging.basicConfig(filename=str(pid) + '.log',format='[' + str(pid) + '] %(levelname)s: %(message)s', level=logging.DEBUG)
@@ -54,7 +56,7 @@ def master_handler():
                     song_names[songName] = song_names[songName] + 1
                     msg_to_server = '%s %d %s\n' % (s[0], song_names[songName], s[1])
 
-                if server_id:
+                if server_id not in socks:
                     sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     sock_to_server.bind(('localhost', CLIENT_PORT_BASE + pid))
@@ -63,17 +65,20 @@ def master_handler():
                     if status != 0:
                         logging.debug('connection to server failed: ' + server_id)
                         continue
+                    socks[server_id] = sock_to_server
 
-                    sock_to_server.sendall(msg_to_server)
-                    
-                    response = sock_to_server.recv(256)
-                    response = response.split('\n')[0].split()[0]
-                    if s[0] == 'get':
-                        master_sock.sendall('getResp %s:%s\n' % (songName, response))
-                    elif response != 'ack':
-                        # write fails
-                        song_names[songName] = song_names[songName] - 1
-                    sock_to_server.close()
+                socks[server_id].sendall(msg_to_server)
+                logging.debug('send to server ' + msg_to_server)
+                
+                response = socks[server_id].recv(256)
+                logging.debug('response from server ' + response)
+                response = response.split('\n')[0].split()[0]
+                if s[0] == 'get':
+                    master_sock.sendall('getResp %s:%s\n' % (songName, response))
+                elif response != 'ack':
+                    # write fails
+                    song_names[songName] = song_names[songName] - 1
+
         else:
             logging.info('connection from master closed')
             break

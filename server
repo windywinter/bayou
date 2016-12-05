@@ -92,27 +92,26 @@ class logEntry:
 
     def process_log(self):
         global play_list, version_vector, retirement
+        if version_vector[self.pn] < self.accept_t:
+            version_vector[self.pn] = self.accept_t
         if self.type == 'CREATE':
-            version_vector[self.interal_id] = self.accept_t
+            if self.interal_id not in version_vector:
+                version_vector[self.interal_id] = -1
         elif self.type == 'RETIRE':
             if not retirement and self.interal_id in version_vector:
                 version_vector.pop(self.interal_id)
         elif self.type == 'PUT':
-            if version_vector[self.interal_id] < self.accept_t:
-                version_vector[self.interal_id] = self.accept_t
             if self.song_name not in play_list:
                 play_list[self.song_name] = {'url' : self.url, 'nwrites' : 1}
             else:
                 play_list[self.song_name]['url'] = self.url
                 play_list[self.song_name]['nwrites'] = play_list[self.song_name]['nwrites'] + 1
         elif self.type == 'DELETE':
-            if version_vector[self.interal_id] < self.accept_t:
-                version_vector[self.interal_id] = self.accept_t
             if self.song_name in play_list:
                 play_list.pop(self.song_name)
 
 def master_handler(master_sock):
-    global close_flag, accept_time, pname, retirement, write_log, committed_log, primary
+    global close_flag, accept_time, pname, retirement, write_log, committed_log, primary, pid, version_vector
     while True:
         try:
             data = master_sock.recv(256)
@@ -143,12 +142,16 @@ def master_handler(master_sock):
                                 # assume the other process already has a name
                                 sock.sendall('create\n')
                                 name_resp = sock.recv(256)
+                                logging.debug('%d send create to %d, response is ' + name_resp, pid, server_id)
                                 name_resp = name_resp.split('\n')[0].split()
                                 accept_time = int(name_resp[0]) + 1
                                 pname = '%s|%d' % (name_resp[1], int(name_resp[0]))
+                                version_vector[pname] = accept_time - 1
+                                version_vector[name_resp[1]] = -1
                             else:
                                 sock.sendall('establish\n')
                                 name_resp = sock.recv(256)
+                                logging.debug('%d send establish to %d, response is ' + name_resp, pid, server_id)
                                 name_resp = name_resp.split('\n')[0].split()
                                 if name_resp[0] == 'create':
                                     log_lock.acquire()
@@ -156,8 +159,9 @@ def master_handler(master_sock):
                                         committed_log.append(logEntry(CSN + 1, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
                                     else:
                                         write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
-                                    accept_time = accept_time + 1
                                     sock.sendall('%d %s\n' % (accept_time, pname))
+                                    accept_time = accept_time + 1
+                                    version_vector[pname] = accept_time - 1
                                     log_lock.release()
                                 # the other case : peer has name, so directly enter AE
                             thread.start_new_thread(anti_entropy, (sock, server_id))
@@ -173,6 +177,7 @@ def master_handler(master_sock):
                     else:
                         write_log.append(logEntry(INT_MAX, accept_time, pname, 'RETIRE %s' % pname))
                     accept_time = accept_time + 1
+                    version_vector[pname] = accept_time - 1
                     retirement = True
                     log_lock.release()
                 elif s[0] == 'printLog':
@@ -209,7 +214,7 @@ def master_handler(master_sock):
     os._exit(1)
 
 def server_handler(server_sock, server_id):
-    global pname, accept_time, write_log, committed_log, play_list
+    global pname, accept_time, write_log, committed_log, play_list, version_vector
     active_flag = True
     while active_flag:
         try:
@@ -237,6 +242,7 @@ def server_handler(server_sock, server_id):
                         else:
                             write_log.append(logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (s[2], s[3])))
                         accept_time = accept_time + 1
+                        version_vector[pname] = accept_time - 1
                         log_lock.release()
                     else:
                         # write fails
@@ -254,6 +260,7 @@ def server_handler(server_sock, server_id):
                         else:
                             write_log.append(logEntry(INT_MAX, accept_time, pname, 'DELETE %s' % s[2]))
                         accept_time = accept_time + 1
+                        version_vector[pname] = accept_time - 1
                         log_lock.release()
                     else:
                         # write fails
@@ -279,8 +286,9 @@ def server_handler(server_sock, server_id):
                         committed_log.append(logEntry(CSN + 1, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
                     else:
                         write_log.append(logEntry(INT_MAX, accept_time, pname, 'CREATE %s|%d' % (pname, accept_time)))
-                    accept_time = accept_time + 1
                     server_sock.sendall('%d %s\n' % (accept_time, pname))
+                    accept_time = accept_time + 1
+                    version_vector[pname] = accept_time - 1
                     close_flag[server_id] = False
                     log_lock.release()
                     anti_entropy(server_sock, server_id)
@@ -290,9 +298,12 @@ def server_handler(server_sock, server_id):
                     if pname == None:
                         server_sock.sendall('create\n')
                         name_resp = server_sock.recv(256)
+                        logging.debug('%d send create to %d, response is ' + name_resp, pid, server_id)
                         name_resp = name_resp.split('\n')[0].split()
                         accept_time = int(name_resp[0]) + 1
                         pname = '%s|%d' % (name_resp[1], int(name_resp[0]))
+                        version_vector[pname] = accept_time - 1
+                        version_vector[name_resp[1]] = -1
                     else:
                         server_sock.sendall('ack\n')
                     close_flag[server_id] = False
@@ -301,7 +312,7 @@ def server_handler(server_sock, server_id):
                     break
                 # other cases will be handled in anti-entropy
         else:
-            logging.info('connection from master closed')
+            logging.info('connection from server closed')
             break
     server_sock.close()
     logging.info('process %d loses connection from %d', pid, server_id)
@@ -328,38 +339,59 @@ def anti_entropy(server_sock, server_id):
         time.sleep(0.05)
         # only one instance of AE could be excecuted at a time
         log_lock.acquire()
-        server_sock.sendall('csn %d %s\n' % (CSN, str(version_vector).replace(' ', '')))
-        response = server_sock.recv(512)
-        response = response.split('\n')[0].split()
-        if response[0] == 'csn':
+        try:
+            server_sock.sendall('csn %d %s %s\n' % (CSN, str(version_vector).replace(' ', ''), pname))
+            response = server_sock.recv(512)
+        except:
+            response = None
+        if response:
+            logging.debug("anti-entropy with " + str(server_id) + " begin: " + response)
+            logging.debug("my vv " + str(CSN) + ": " + str(version_vector))
+            response = response.split('\n')[0].split()
+            if response[0] != 'csn':
+                log_lock.release()
+                break
             other_csn = int(response[1])
             other_vv = ast.literal_eval(response[2])
+            other_pn = response[3]
             if CSN > other_csn:
                 for log in committed_log:
-                    # committed log
-                    completevalue = completeV(log.pn, other_vv)
-                    if log.accept_t <= completevalue:
-                        server_sock.sendall('commit %d %s %d\n' % (log.accept_t, log.pn, log.csn))
-                    else:
-                        server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+                    if log.csn > other_csn:
+                        # committed log
+                        completevalue = completeV(log.pn, other_vv)
+                        # print other_vv, log.pn
+                        if log.accept_t <= completevalue:
+                            server_sock.sendall('commit %d %s %d\n' % (log.accept_t, log.pn, log.csn))
+                            logging.debug('AE send to %d : commit %d %s %d\n' % (server_id, log.accept_t, log.pn, log.csn))
+                        else:
+                            server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+                            logging.debug('AE send to %d : write %d %s %d %s\n' % (server_id, log.accept_t, log.pn, log.csn, log.cmd))
             for log in write_log:
                 completevalue = completeV(log.pn, other_vv)
+                # print other_vv, log.pn
                 # tentative log
                 if log.accept_t > completevalue:
                     server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
+                    logging.debug('AE send to %d : write %d %s %d %s\n' % (server_id, log.accept_t, log.pn, log.csn, log.cmd))
             if retirement:
                 if primary:
                     primary = False
                     server_sock.sendall('primary\n')
+                    logging.debug('AE send to %d : primary' % server_id)
                 server_sock.sendall('end\n')
+                logging.debug('AE send to %d : end' % server_id)
+                log_lock.release()
                 break
             server_sock.sendall('end\n')
+            logging.debug('AE send to %d : end' % server_id)
             ae_end_flag = False
             while not ae_end_flag:
                 response = server_sock.recv(256)
                 logging.debug("anti-entropy data: " + response)
                 response = response.split('\n')
                 for msg in response:
+                    if not msg:
+                        break
                     words = msg.split()
                     if words[0] == 'commit':
                         # find the tentative log and make it commited
@@ -372,13 +404,18 @@ def anti_entropy(server_sock, server_id):
                             if write_log[ii].accept_t == new_accept_t and write_log[ii].pn == new_pn:
                                 log_to_commit = write_log.pop(ii)
                                 break
+                        # if not log_to_commit:
+                        #     continue
                         log_to_commit.csn = new_csn
+                        log_to_commit.process_log()
                         committed_log.append(log_to_commit)
                     elif words[0] == 'write':
                         new_accept_t = int(words[1])
                         new_pn = words[2]
                         new_csn = int(words[3])
                         new_cmd = words[4]
+                        for ii in range(5, len(words)):
+                            new_cmd = new_cmd + ' ' + words[ii]
                         if new_csn == INT_MAX:
                             if not primary:
                                 write_log.append(logEntry(new_csn, new_accept_t, new_pn, new_cmd))
@@ -401,8 +438,12 @@ def anti_entropy(server_sock, server_id):
 
             if other_csn > CSN:
                 CSN = other_csn
+        else:
+            log_lock.release()
+            break
         log_lock.release()
     server_sock.close()
+    close_flag.pop(server_id)
     logging.info('process %d loses connection from %d', pid, server_id)
     if retirement:
         os._exit(1)
@@ -413,6 +454,12 @@ sock_to_master.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock_to_master.bind(('localhost', master_port))
 sock_to_master.listen(1)
 
+if pid == 0:
+    primary = True
+    pname = '0'
+accept_time = 0
+version_vector['0'] = accept_time - 1
+
 # start responding to master
 master_sock, _ = sock_to_master.accept()
 # start new thread to handle master connection
@@ -422,12 +469,7 @@ thread.start_new_thread(master_handler, (master_sock,))
 sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock_to_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock_to_server.bind(('localhost', SERVER_PORT_BASE + pid))
-sock_to_server.listen(1)
-
-if pid == 0:
-    primary = True
-    pname = '0'
-    accept_time = 0
+sock_to_server.listen(30)
 
 while True:
     server_sock, server_addr = sock_to_server.accept()

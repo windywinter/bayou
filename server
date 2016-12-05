@@ -92,7 +92,7 @@ class logEntry:
 
     def process_log(self):
         global play_list, version_vector, retirement
-        if version_vector[self.pn] < self.accept_t:
+        if self.pn not in version_vector or version_vector[self.pn] < self.accept_t:
             version_vector[self.pn] = self.accept_t
         if self.type == 'CREATE':
             if self.interal_id not in version_vector:
@@ -133,7 +133,7 @@ def master_handler(master_sock):
 
                             status = sock.connect_ex(('localhost', SERVER_PORT_BASE + server_id))
                             if status != 0:
-                                logging.debug('connection to server failed: ' + server_id)
+                                logging.debug('connection to server failed: ' + str(server_id))
                                 continue
                             # socks[server_id] = sock
                             close_flag[server_id] = False
@@ -240,7 +240,9 @@ def server_handler(server_sock, server_id):
                         if primary:
                             committed_log.append(logEntry(CSN + 1, accept_time, pname, 'PUT %s %s' % (s[2], s[3])))
                         else:
-                            write_log.append(logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (s[2], s[3])))
+                            tmplog = logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (s[2], s[3]))
+                            tmplog.process_log()
+                            write_log.append(tmplog)
                         accept_time = accept_time + 1
                         version_vector[pname] = accept_time - 1
                         log_lock.release()
@@ -258,7 +260,9 @@ def server_handler(server_sock, server_id):
                         if primary:
                             committed_log.append(logEntry(CSN + 1, accept_time, pname, 'DELETE %s' % s[2]))
                         else:
-                            write_log.append(logEntry(INT_MAX, accept_time, pname, 'DELETE %s' % s[2]))
+                            tmplog = logEntry(INT_MAX, accept_time, pname, 'DELETE %s' % s[2])
+                            tmplog.process_log()
+                            write_log.append(tmplog)
                         accept_time = accept_time + 1
                         version_vector[pname] = accept_time - 1
                         log_lock.release()
@@ -334,6 +338,7 @@ def completeV(pn, vv):
 
 def anti_entropy(server_sock, server_id):
     global close_flag, retirement, CSN, write_log, committed_log, pname, version_vector, primary
+    retire_decision = retirement
     while not close_flag[server_id]:
         # keep synchronized and wait for a while before a new AE
         time.sleep(0.05)
@@ -345,6 +350,8 @@ def anti_entropy(server_sock, server_id):
         except:
             response = None
         if response:
+            # whether to retire
+            retire_decision = retirement
             logging.debug("anti-entropy with " + str(server_id) + " begin: " + response)
             logging.debug("my vv " + str(CSN) + ": " + str(version_vector))
             response = response.split('\n')[0].split()
@@ -354,6 +361,14 @@ def anti_entropy(server_sock, server_id):
             other_csn = int(response[1])
             other_vv = ast.literal_eval(response[2])
             other_pn = response[3]
+            # send retirement at the beginning of AE
+            if retirement:
+                server_sock.sendall('retire\n')
+                logging.debug('AE send to %d : retire\n' % (server_id))
+                if primary:
+                    server_sock.sendall('primary\n')
+                    logging.debug('AE send to %d : primary\n' % server_id)
+
             if CSN > other_csn:
                 for log in committed_log:
                     if log.csn > other_csn:
@@ -373,20 +388,15 @@ def anti_entropy(server_sock, server_id):
                 if log.accept_t > completevalue:
                     server_sock.sendall('write %d %s %d %s\n' % (log.accept_t, log.pn, log.csn, log.cmd))
                     logging.debug('AE send to %d : write %d %s %d %s\n' % (server_id, log.accept_t, log.pn, log.csn, log.cmd))
-            if retirement:
-                if primary:
-                    primary = False
-                    server_sock.sendall('primary\n')
-                    logging.debug('AE send to %d : primary' % server_id)
-                server_sock.sendall('end\n')
-                logging.debug('AE send to %d : end' % server_id)
-                log_lock.release()
-                break
+
             server_sock.sendall('end\n')
             logging.debug('AE send to %d : end' % server_id)
             ae_end_flag = False
             while not ae_end_flag:
-                response = server_sock.recv(256)
+                try:
+                    response = server_sock.recv(256)
+                except:
+                    break
                 logging.debug("anti-entropy data: " + response)
                 response = response.split('\n')
                 for msg in response:
@@ -394,6 +404,9 @@ def anti_entropy(server_sock, server_id):
                         break
                     words = msg.split()
                     if words[0] == 'commit':
+                        # have decided whether to retire
+                        if retire_decision and primary:
+                            primary = False
                         # find the tentative log and make it commited
                         # must not be the primary
                         new_accept_t = int(words[1])
@@ -410,6 +423,9 @@ def anti_entropy(server_sock, server_id):
                         log_to_commit.process_log()
                         committed_log.append(log_to_commit)
                     elif words[0] == 'write':
+                        # have decided whether to retire
+                        if retire_decision and primary:
+                            primary = False
                         new_accept_t = int(words[1])
                         new_pn = words[2]
                         new_csn = int(words[3])
@@ -423,21 +439,38 @@ def anti_entropy(server_sock, server_id):
                                 committed_log.append(logEntry(CSN + 1, new_accept_t, new_pn, new_cmd))
                         else:
                             committed_log.append(logEntry(new_csn, new_accept_t, new_pn, new_cmd))
+                    elif words[0] == 'retire':
+                        # Let the other retire
+                        if retirement and pname > other_pn:
+                            retire_decision = False
                     elif words[0] == 'primary':
-                        primary = True
-                        CSN = other_csn
+                        if not retire_decision:
+                            primary = True
+                            CSN = other_csn
                     elif words[0] == 'end':
+                        if retire_decision and primary:
+                            primary = False
                         for ii in range(len(write_log)):
+                            # redo all tentative logs
+                            write_log[ii].process_log()
                             if primary:
                                 write_log[ii].csn = CSN + 1
                                 CSN = CSN + 1
-                            # redo all tentative logs
-                            write_log[ii].process_log()
+                                committed_log.append(write_log[ii])
+                        if primary:
+                            write_log[:] = []
                         ae_end_flag = True
                         break
 
+            if not ae_end_flag:
+                log_lock.release()
+                break
             if other_csn > CSN:
                 CSN = other_csn
+
+            if retire_decision:
+                log_lock.release()
+                break
         else:
             log_lock.release()
             break
@@ -445,7 +478,8 @@ def anti_entropy(server_sock, server_id):
     server_sock.close()
     close_flag.pop(server_id)
     logging.info('process %d loses connection from %d', pid, server_id)
-    if retirement:
+    logging.info('retire decision %r', retire_decision)
+    if retire_decision:
         os._exit(1)
 
 #create socket for master

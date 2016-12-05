@@ -10,7 +10,4 @@
 3 delete song2 0
 3 get song1 0
 4 get song2 1
-0 printLog
-1 printLog
-2 printLog
 exit

@@ -42,7 +42,7 @@ accept_time = 0
 
 version_vector = {} # pname : max(accept_time)
 
-play_list = {} # {song_name : {url:str, nwrites : int}}
+play_list = {} # {song_name : url}
 
 primary = False
 
@@ -101,11 +101,7 @@ class logEntry:
             if not retirement and self.interal_id in version_vector:
                 version_vector.pop(self.interal_id)
         elif self.type == 'PUT':
-            if self.song_name not in play_list:
-                play_list[self.song_name] = {'url' : self.url, 'nwrites' : 1}
-            else:
-                play_list[self.song_name]['url'] = self.url
-                play_list[self.song_name]['nwrites'] = play_list[self.song_name]['nwrites'] + 1
+            play_list[self.song_name] = self.url
         elif self.type == 'DELETE':
             if self.song_name in play_list:
                 play_list.pop(self.song_name)
@@ -183,26 +179,33 @@ def master_handler(master_sock):
                 elif s[0] == 'printLog':
                     all_log = 'log '
                     log_lock.acquire()
+                    counter_log = 0
                     for log_entry in committed_log:
+                        if counter_log > 0:
+                            all_log = all_log + ','
                         stable_bool = 'TRUE'
                         if log_entry.type == 'PUT':
-                            all_log = all_log + ',%s:(%s,%s):%s' % (log_entry.type, log_entry.song_name, log_entry.url, stable_bool)
+                            all_log = all_log + '%s:(%s,%s):%s' % (log_entry.type, log_entry.song_name, log_entry.url, stable_bool)
                         elif log_entry.type == 'DELETE':
-                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.song_name, stable_bool)
+                            all_log = all_log + '%s:(%s):%s' % (log_entry.type, log_entry.song_name, stable_bool)
                         elif log_entry.type == 'CREATE':
-                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                            all_log = all_log + '%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
                         elif log_entry.type == 'RETIRE':
-                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                            all_log = all_log + '%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                        counter_log = counter_log + 1
                     for log_entry in write_log:
+                        if counter_log > 0:
+                            all_log = all_log + ','
                         stable_bool = 'FALSE'
                         if log_entry.type == 'PUT':
-                            all_log = all_log + ',%s:(%s,%s):%s' % (log_entry.type, log_entry.song_name, log_entry.url, stable_bool)
+                            all_log = all_log + '%s:(%s,%s):%s' % (log_entry.type, log_entry.song_name, log_entry.url, stable_bool)
                         elif log_entry.type == 'DELETE':
-                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.song_name, stable_bool)
+                            all_log = all_log + '%s:(%s):%s' % (log_entry.type, log_entry.song_name, stable_bool)
                         elif log_entry.type == 'CREATE':
-                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                            all_log = all_log + '%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
                         elif log_entry.type == 'RETIRE':
-                            all_log = all_log + ',%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                            all_log = all_log + '%s:(%s):%s' % (log_entry.type, log_entry.interal_id, stable_bool)
+                        counter_log = counter_log + 1
                     log_lock.release()
                     all_log = all_log + '\n'
                     master_sock.sendall(all_log)
@@ -212,6 +215,16 @@ def master_handler(master_sock):
     master_sock.close()
     logging.info('process %d exits', pid)
     os._exit(1)
+
+# compare mine vv with client's, return true if write can succeed
+def compare_vv(mine, other):
+    # print mine
+    # print other
+    # print '--------------'
+    for key in other.keys():
+        if completeV(key, mine) < other[key]:
+            return False
+    return True
 
 def server_handler(server_sock, server_id):
     global pname, accept_time, write_log, committed_log, play_list, version_vector
@@ -229,54 +242,51 @@ def server_handler(server_sock, server_id):
                 s = line.split()
                 # cases when peer is client
                 if s[0] == 'add':
-                    client_write_times = int(s[1])
-                    songName = s[2]
-                    url = s[3]
-                    if songName not in play_list:
-                        play_list[songName] = {'url' : None, 'nwrites' : 0}
-                    if play_list[songName]['nwrites'] >= client_write_times - 1:
-                        server_sock.sendall('ack\n')
+                    songName = s[1]
+                    url = s[2]
+                    client_vv = ast.literal_eval(s[3])
+                    if compare_vv(version_vector, client_vv):
                         log_lock.acquire()
                         if primary:
-                            committed_log.append(logEntry(CSN + 1, accept_time, pname, 'PUT %s %s' % (s[2], s[3])))
+                            committed_log.append(logEntry(CSN + 1, accept_time, pname, 'PUT %s %s' % (songName, url)))
                         else:
-                            tmplog = logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (s[2], s[3]))
+                            tmplog = logEntry(INT_MAX, accept_time, pname, 'PUT %s %s' % (songName, url))
                             tmplog.process_log()
                             write_log.append(tmplog)
                         accept_time = accept_time + 1
-                        version_vector[pname] = accept_time - 1
+                        server_sock.sendall('ack %s\n' % str(version_vector).replace(' ', ''))
                         log_lock.release()
                     else:
                         # write fails
                         server_sock.sendall('failed\n')
                 elif s[0] == 'delete':
-                    client_write_times = int(s[1])
-                    songName = s[2]
-                    if songName not in play_list:
-                        play_list[songName] = {'url' : None, 'nwrites' : 0}
-                    if play_list[songName]['nwrites'] >= client_write_times - 1:
-                        server_sock.sendall('ack\n')
+                    songName = s[1]
+                    client_vv = ast.literal_eval(s[2])
+                    if songName in play_list and compare_vv(version_vector, client_vv):
                         log_lock.acquire()
                         if primary:
-                            committed_log.append(logEntry(CSN + 1, accept_time, pname, 'DELETE %s' % s[2]))
+                            committed_log.append(logEntry(CSN + 1, accept_time, pname, 'DELETE %s' % songName))
                         else:
-                            tmplog = logEntry(INT_MAX, accept_time, pname, 'DELETE %s' % s[2])
+                            tmplog = logEntry(INT_MAX, accept_time, pname, 'DELETE %s' % songName)
                             tmplog.process_log()
                             write_log.append(tmplog)
                         accept_time = accept_time + 1
-                        version_vector[pname] = accept_time - 1
+                        server_sock.sendall('ack %s\n' % str(version_vector).replace(' ', ''))
                         log_lock.release()
                     else:
                         # write fails
                         server_sock.sendall('failed\n')
                 elif s[0] == 'get':
-                    client_write_times = int(s[1])
-                    songName = s[2]
-                    return_msg = None
+                    songName = s[1]
+                    client_vv = ast.literal_eval(s[2])
+                    return_msg = ''
                     if songName not in play_list:
-                        return_msg = 'ERR_KEY\n'
-                    elif play_list[songName]['nwrites'] >= client_write_times:
-                        return_msg = play_list[songName]['url'] + '\n'
+                        if compare_vv(version_vector, client_vv):
+                            return_msg = 'ERR_KEY\n'
+                        else:
+                            return_msg = 'ERR_DEP\n'
+                    elif compare_vv(version_vector, client_vv):
+                        return_msg = play_list[songName] + ' %s\n' % str(version_vector).replace(' ', '')
                     else:
                         # read fails, error dependency
                         return_msg = 'ERR_DEP\n'

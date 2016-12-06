@@ -5,6 +5,7 @@ import sys
 import socket
 import os
 import logging
+import ast
 
 if not len(sys.argv) == 3:
     print "Usage : server [id] [master_port]"
@@ -18,12 +19,20 @@ master_port = int(sys.argv[2])
 
 socks = {} # server_id : connection
 
-song_names = {} # songName : number of writes
+write_vvs = {} # {songName : vv}
+read_vvs = {} # {songName : vv}
 
 logging.basicConfig(filename=str(pid) + '.log',format='[' + str(pid) + '] %(levelname)s: %(message)s', level=logging.DEBUG)
 
+def vv_inf(mine, other):
+    res = mine
+    for key in other.keys():
+        if key not in res or res[key] < other[key]:
+            res[key] = other[key]
+    return res
+
 def master_handler():
-    global master_sock
+    global master_sock, write_vvs, read_vvs
     while True:
         try:
             data = master_sock.recv(256)
@@ -41,20 +50,21 @@ def master_handler():
                 server_id = None
                 msg_to_server = None
                 songName = s[1]
-                if songName not in song_names:
-                    song_names[songName] = 0
+                if songName not in read_vvs:
+                    read_vvs[songName] = {}
+                if songName not in write_vvs:
+                    write_vvs[songName] = {}
+                res_vv = vv_inf(write_vvs[songName], read_vvs[songName])
                 if s[0] == 'add':
                     url = s[2]
                     server_id = int(s[3])
-                    song_names[songName] = song_names[songName] + 1
-                    msg_to_server = '%s %d %s %s\n' % (s[0], song_names[songName], s[1], s[2])
+                    msg_to_server = '%s %s %s %s\n' % ('add', songName, url, str(res_vv).replace(' ', ''))
                 elif s[0] == 'get':
                     server_id = int(s[2])
-                    msg_to_server = '%s %d %s\n' % (s[0], song_names[songName], s[1])
+                    msg_to_server = '%s %s %s\n' % ('get', songName, str(res_vv).replace(' ', ''))
                 elif s[0] == 'delete':
                     server_id = int(s[2])
-                    song_names[songName] = song_names[songName] + 1
-                    msg_to_server = '%s %d %s\n' % (s[0], song_names[songName], s[1])
+                    msg_to_server = '%s %s %s\n' % ('delete', songName, str(res_vv).replace(' ', ''))
 
                 if server_id not in socks:
                     sock_to_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -70,14 +80,20 @@ def master_handler():
                 socks[server_id].sendall(msg_to_server)
                 logging.debug('send to server ' + msg_to_server)
                 
-                response = socks[server_id].recv(256)
+                try:
+                    response = socks[server_id].recv(256)
+                except:
+                    response = ''
                 logging.debug('response from server ' + response)
-                response = response.split('\n')[0].split()[0]
+                response = response.split('\n')[0].split()
                 if s[0] == 'get':
-                    master_sock.sendall('getResp %s:%s\n' % (songName, response))
-                elif response != 'ack':
-                    # write fails
-                    song_names[songName] = song_names[songName] - 1
+                    ret_url = response[0]
+                    master_sock.sendall('getResp %s:%s\n' % (songName, ret_url))
+                    if len(response) > 1:
+                        read_vvs[songName] = ast.literal_eval(response[1])
+                elif response[0] == 'ack':
+                    # write succeeded
+                    write_vvs[songName] = ast.literal_eval(response[1])
 
         else:
             logging.info('connection from master closed')

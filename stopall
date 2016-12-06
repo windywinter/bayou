@@ -1,4 +1,5 @@
 #!/bin/bash
 
-killall -9 python
+killall server
+killall client
 rm *.log
